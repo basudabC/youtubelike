@@ -1,14 +1,14 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import {
-    Play, Clock, TrendingUp, Award, Target, Calendar,
-    BarChart3, PieChart, Activity, Zap, BookOpen, Video
+    Play, Clock, Award, Target,
+    PieChart, Activity, Zap, BookOpen, Video
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useDashboard } from '@/hooks/useUserFeatures';
 import { useWatchHistory } from '@/hooks/useUserFeatures';
 import { Progress } from '@/components/ui/progress';
-import { formatDuration, formatTimeAgo } from '@/lib/utils';
+import { formatDuration } from '@/lib/utils';
 
 interface UserOverviewProps {
     onVideoSelect: (videoId: string) => void;
@@ -20,12 +20,16 @@ export function UserOverview({ onVideoSelect }: UserOverviewProps) {
     const { history } = useWatchHistory();
 
     // Calculate statistics from watch history
+    // Note: history items have current_time (seconds), percentage_watched, and completed fields
     const stats = {
-        totalWatchTime: history.reduce((acc: number, item: any) => acc + (item.watch_time || 0), 0),
-        videosCompleted: history.filter((item: any) => item.progress >= 90).length,
-        videosInProgress: history.filter((item: any) => item.progress > 0 && item.progress < 90).length,
+        totalWatchTime: history.reduce((acc: number, item: any) => acc + (item.current_time || 0), 0),
+        videosCompleted: history.filter((item: any) => item.completed === true).length,
+        videosInProgress: history.filter((item: any) => !item.completed && (item.current_time || 0) > 0).length,
         currentStreak: dashboardData?.streak || 0,
     };
+
+    console.log('[UserOverview] Stats calculated:', stats);
+    console.log('[UserOverview] History data:', history);
 
     // Calculate time by category/topic
     const timeByTopic: Record<string, { name: string; time: number; color: string; count: number }> = {};
@@ -40,7 +44,7 @@ export function UserOverview({ onVideoSelect }: UserOverviewProps) {
                         count: 0,
                     };
                 }
-                timeByTopic[topic.id].time += item.watch_time || 0;
+                timeByTopic[topic.id].time += item.current_time || 0;
                 timeByTopic[topic.id].count += 1;
             });
         }

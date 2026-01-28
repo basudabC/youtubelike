@@ -133,6 +133,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return result;
   };
 
+  const isAdminUser = user?.role === 'admin';
+
+  // Debug logging
+  if (user) {
+    console.log('[AuthContext] User role:', user.role, 'isAdmin:', isAdminUser);
+  }
+
   const value = {
     user,
     session,
@@ -141,7 +148,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     signUp,
     signOut,
     updateProfile,
-    isAdmin: user?.role === 'admin',
+    isAdmin: isAdminUser,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
