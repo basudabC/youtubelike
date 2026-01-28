@@ -13,6 +13,7 @@ import { useVideo } from '@/hooks/useVideos';
 import { useWatchLater } from '@/hooks/useUserFeatures';
 import { useComments } from '@/hooks/useUserFeatures';
 import { formatDuration, calculateProgress, validateWatchTime, formatTimeAgo } from '@/lib/utils';
+import { supabase } from '@/lib/supabase/client';
 // import type { VideoWithDetails } from '@/types/database';
 
 interface VideoPlayerProps {
@@ -40,6 +41,8 @@ export function VideoPlayer({ videoId, onNavigate, onTopicSelect }: VideoPlayerP
   const [canSkip, setCanSkip] = useState(false);
   const [showSkipNotice, setShowSkipNotice] = useState(false);
   const [isBookmarked, setIsBookmarked] = useState(false);
+  const [relatedVideos, setRelatedVideos] = useState<any[]>([]);
+  const progressIntervalRef = useRef<number | null>(null);
 
   // Video progress management
   const progress = calculateProgress(currentTime, duration);
@@ -80,12 +83,45 @@ export function VideoPlayer({ videoId, onNavigate, onTopicSelect }: VideoPlayerP
           onReady: (event: { target: any }) => {
             setPlayer(event.target);
             setDuration(event.target.getDuration());
+            console.log('YouTube player ready, duration:', event.target.getDuration());
           },
-          onStateChange: (event: { data: number }) => {
-            setIsPlaying(event.data === 1);
-            if (event.data === 1) {
-              // Playing - start tracking progress
-              startProgressTracking();
+          onStateChange: (event: { data: number; target: any }) => {
+            const isNowPlaying = event.data === 1;
+            const playerInstance = event.target;
+            setIsPlaying(isNowPlaying);
+
+            if (isNowPlaying) {
+              console.log('Video started playing - starting progress tracking');
+              // Clear any existing interval
+              if (progressIntervalRef.current) {
+                clearInterval(progressIntervalRef.current);
+              }
+              // Start new tracking interval
+              progressIntervalRef.current = setInterval(() => {
+                if (playerInstance && playerInstance.getCurrentTime) {
+                  const time = playerInstance.getCurrentTime();
+                  setCurrentTime(time);
+
+                  console.log('Current time:', Math.floor(time), 'seconds');
+
+                  // Check if user can skip
+                  const canNowSkip = validateWatchTime(time, duration, minWatchTime);
+                  setCanSkip(canNowSkip);
+
+                  // Auto-save progress every 10 seconds (changed from 30 for testing)
+                  const timeFloor = Math.floor(time);
+                  if (user && timeFloor % 10 === 0 && timeFloor > 0) {
+                    console.log('Triggering save at', timeFloor, 'seconds');
+                    saveProgress(time);
+                  }
+                }
+              }, 1000);
+            } else {
+              // Paused or stopped - clear interval
+              if (progressIntervalRef.current) {
+                clearInterval(progressIntervalRef.current);
+                progressIntervalRef.current = null;
+              }
             }
           },
         },
@@ -104,46 +140,92 @@ export function VideoPlayer({ videoId, onNavigate, onTopicSelect }: VideoPlayerP
       if (player) {
         player.destroy();
       }
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+      }
     };
   }, [video]);
 
-  // Progress tracking
-  const startProgressTracking = useCallback(() => {
-    const interval = setInterval(() => {
-      if (player && player.getCurrentTime) {
-        const time = player.getCurrentTime();
-        setCurrentTime(time);
-
-        // Check if user can skip
-        const canNowSkip = validateWatchTime(time, duration, minWatchTime);
-        setCanSkip(canNowSkip);
-
-        // Auto-save progress
-        if (user && Math.floor(time) % 30 === 0) {
-          saveProgress(time);
-        }
+  // Fetch related videos from the same topics
+  useEffect(() => {
+    const fetchRelatedVideos = async () => {
+      if (!video || !video.topics || video.topics.length === 0) {
+        setRelatedVideos([]);
+        return;
       }
-    }, 1000);
 
-    return () => clearInterval(interval);
-  }, [player, duration, user]);
+      try {
+        const topicIds = video.topics.map((t: any) => t.id);
+
+        // Fetch videos from the same topics
+        const { data, error } = await supabase
+          .from('videos')
+          .select(`
+            *,
+            channel:channels(*),
+            topics:video_topics(topic:topics(*))
+          `)
+          .eq('status', 'approved')
+          .neq('id', video.id)
+          .limit(10);
+
+        if (error) throw error;
+
+        // Process and filter videos that share at least one topic
+        const processedVideos = ((data || []) as any[]).map((v: any) => ({
+          ...v,
+          topics: (v.topics as any[])?.map((vt: any) => vt.topic).filter(Boolean) || [],
+        })).filter((v: any) => {
+          // Check if video has at least one matching topic
+          return v.topics.some((t: any) => topicIds.includes(t.id));
+        }).slice(0, 3);
+
+        setRelatedVideos(processedVideos);
+      } catch (error) {
+        console.error('Failed to fetch related videos:', error);
+        setRelatedVideos([]);
+      }
+    };
+
+    fetchRelatedVideos();
+  }, [video]);
 
   // Save progress to database
   const saveProgress = useCallback(async (time: number) => {
     if (!user || !video) return;
 
+    // Use video.duration to ensure we have the correct duration
+    const videoDuration = video.duration || duration;
+
+    if (!videoDuration || videoDuration === 0) {
+      console.warn('Cannot save progress: duration is 0');
+      return;
+    }
+
     try {
-      await fetch('/api/video/progress', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: user.id,
-          video_id: video.id,
-          current_time: Math.floor(time),
-          duration: duration,
-          completed: time >= duration - 5,
-        }),
-      });
+      const progressData = {
+        user_id: user.id,
+        video_id: video.id,
+        current_time: Math.floor(time),
+        duration: videoDuration,
+        completed: time >= videoDuration - 5,
+        last_watched_at: new Date().toISOString(),
+      };
+
+      console.log('Saving progress data:', progressData);
+
+      // Use upsert to insert or update progress
+      const { error } = await supabase
+        .from('watch_progress')
+        .upsert(progressData as any, {
+          onConflict: 'user_id,video_id',
+        });
+
+      if (error) {
+        console.error('Supabase error saving progress:', error);
+      } else {
+        console.log('Progress saved successfully:', Math.floor(time), 'seconds');
+      }
     } catch (error) {
       console.error('Failed to save progress:', error);
     }
@@ -180,6 +262,50 @@ export function VideoPlayer({ videoId, onNavigate, onTopicSelect }: VideoPlayerP
       setIsBookmarked(true);
     }
   };
+
+  const toggleFullscreen = () => {
+    if (!player) return;
+
+    // Use YouTube iframe API for fullscreen
+    const iframe = player.getIframe();
+    if (!iframe) return;
+
+    if (!document.fullscreenElement) {
+      // Enter fullscreen
+      if (iframe.requestFullscreen) {
+        iframe.requestFullscreen();
+      } else if ((iframe as any).webkitRequestFullscreen) {
+        (iframe as any).webkitRequestFullscreen();
+      } else if ((iframe as any).mozRequestFullScreen) {
+        (iframe as any).mozRequestFullScreen();
+      } else if ((iframe as any).msRequestFullscreen) {
+        (iframe as any).msRequestFullscreen();
+      }
+    } else {
+      // Exit fullscreen
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      } else if ((document as any).webkitExitFullscreen) {
+        (document as any).webkitExitFullscreen();
+      } else if ((document as any).mozCancelFullScreen) {
+        (document as any).mozCancelFullScreen();
+      } else if ((document as any).msExitFullscreen) {
+        (document as any).msExitFullscreen();
+      }
+    }
+  };
+
+  // Listen for fullscreen changes
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      _setIsFullscreen(!!document.fullscreenElement);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, []);
 
   const handleCommentSubmit = async () => {
     if (!newComment.trim()) return;
@@ -223,11 +349,14 @@ export function VideoPlayer({ videoId, onNavigate, onTopicSelect }: VideoPlayerP
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             <button
-              onClick={() => onNavigate('landing')}
+              onClick={() => {
+                window.history.pushState({}, '', '/dashboard?tab=videos');
+                onNavigate('dashboard');
+              }}
               className="flex items-center gap-2 text-gray-300 hover:text-white transition-colors"
             >
               <ArrowLeft className="w-5 h-5" />
-              <span className="hidden sm:inline">Back to Home</span>
+              <span className="hidden sm:inline">Back to Videos</span>
             </button>
 
             <div className="flex items-center gap-4">
@@ -327,7 +456,11 @@ export function VideoPlayer({ videoId, onNavigate, onTopicSelect }: VideoPlayerP
                         <span>Watch {Math.max(0, Math.ceil((minWatchTime - currentTime) / 60))}m more</span>
                       </div>
                     )}
-                    <button className="p-2 hover:bg-white/10 rounded-lg transition-colors">
+                    <button
+                      onClick={toggleFullscreen}
+                      className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                      title="Toggle fullscreen"
+                    >
                       <Maximize className="w-5 h-5" />
                     </button>
                   </div>
@@ -389,24 +522,43 @@ export function VideoPlayer({ videoId, onNavigate, onTopicSelect }: VideoPlayerP
                 Up Next
               </h3>
               <div className="space-y-4">
-                {[1, 2, 3].map((i) => (
-                  <div
-                    key={i}
-                    className={`flex gap-3 p-3 rounded-xl transition-colors ${canSkip
-                      ? 'hover:bg-gray-700 cursor-pointer'
-                      : 'opacity-50 cursor-not-allowed'
-                      }`}
-                  >
-                    <div className="w-20 h-14 bg-gray-700 rounded-lg flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <h4 className="text-sm font-medium text-white truncate">
-                        Related Video {i}
-                      </h4>
-                      <p className="text-xs text-gray-500">Channel Name</p>
+                {relatedVideos.length > 0 ? (
+                  relatedVideos.map((relatedVideo) => (
+                    <div
+                      key={relatedVideo.id}
+                      onClick={() => {
+                        if (canSkip) {
+                          // Navigate to the new video by updating the URL
+                          window.history.pushState({}, '', `/watch/${relatedVideo.id}`);
+                          window.location.reload();
+                        }
+                      }}
+                      className={`flex gap-3 p-3 rounded-xl transition-colors ${canSkip
+                        ? 'hover:bg-gray-700 cursor-pointer'
+                        : 'opacity-50 cursor-not-allowed'
+                        }`}
+                    >
+                      <div className="w-20 h-14 bg-gray-700 rounded-lg flex-shrink-0 overflow-hidden">
+                        <img
+                          src={relatedVideo.thumbnail_url}
+                          alt={relatedVideo.title}
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h4 className="text-sm font-medium text-white line-clamp-2 mb-1">
+                          {relatedVideo.title}
+                        </h4>
+                        <p className="text-xs text-gray-500">{relatedVideo.channel?.name}</p>
+                      </div>
+                      {!canSkip && <Lock className="w-4 h-4 text-gray-500 flex-shrink-0 mt-1" />}
                     </div>
-                    {!canSkip && <Lock className="w-4 h-4 text-gray-500 flex-shrink-0 mt-1" />}
+                  ))
+                ) : (
+                  <div className="text-center py-8 text-gray-500 text-sm">
+                    No related videos available
                   </div>
-                ))}
+                )}
               </div>
             </div>
 

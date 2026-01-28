@@ -63,7 +63,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signIn = async (email: string, password: string) => {
-    return await supabase.auth.signInWithPassword({ email, password });
+    const result = await supabase.auth.signInWithPassword({ email, password });
+
+    // If login successful, check user status
+    if (result.data?.user && !result.error) {
+      const { data: userData, error: userError } = await supabase
+        .from('users')
+        .select('status, rejection_reason')
+        .eq('id', result.data.user.id)
+        .single();
+
+      if (userError) {
+        return { error: userError };
+      }
+
+      // Block non-approved users
+      if (userData && (userData as any).status === 'pending') {
+        await supabase.auth.signOut();
+        return {
+          error: {
+            message: 'Your account is pending admin approval. Please wait for approval to access the platform.'
+          }
+        };
+      }
+
+      if (userData && (userData as any).status === 'rejected') {
+        await supabase.auth.signOut();
+        return {
+          error: {
+            message: `Your account has been rejected. Reason: ${(userData as any).rejection_reason || 'No reason provided'}`
+          }
+        };
+      }
+    }
+
+    return result;
   };
 
   const signUp = async (email: string, password: string, username: string) => {

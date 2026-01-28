@@ -205,21 +205,78 @@ export function useAdminUsers() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchUsers = useCallback(async () => {
+  const fetchUsers = useCallback(async (status?: string) => {
     setLoading(true);
     setError(null);
 
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('users')
         .select('*')
         .order('created_at', { ascending: false });
+
+      // Filter by status if provided
+      if (status && status !== 'all') {
+        query = query.eq('status', status);
+      }
+
+      const { data, error } = await query;
 
       if (error) throw error;
       return data || [];
     } catch (err: any) {
       setError(err.message || 'Failed to fetch users');
       return [];
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const approveUser = useCallback(async (userId: string, adminId: string) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const { error } = await supabase
+        .from('users')
+        .update({
+          status: 'approved',
+          approved_at: new Date().toISOString(),
+          approved_by: adminId,
+          is_active: true,
+          rejection_reason: null
+        } as unknown as never)
+        .eq('id', userId);
+
+      if (error) throw error;
+      return true;
+    } catch (err: any) {
+      setError(err.message || 'Failed to approve user');
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const rejectUser = useCallback(async (userId: string, reason: string) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const { error } = await supabase
+        .from('users')
+        .update({
+          status: 'rejected',
+          rejection_reason: reason,
+          is_active: false
+        } as unknown as never)
+        .eq('id', userId);
+
+      if (error) throw error;
+      return true;
+    } catch (err: any) {
+      setError(err.message || 'Failed to reject user');
+      return false;
     } finally {
       setLoading(false);
     }
@@ -270,6 +327,8 @@ export function useAdminUsers() {
     loading,
     error,
     fetchUsers,
+    approveUser,
+    rejectUser,
     updateUserStatus,
     resetUserPassword,
   };
@@ -434,5 +493,111 @@ export function useAdminNotices() {
     createNotice,
     updateNotice,
     deleteNotice,
+  };
+}
+
+export function useAdminStats() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchStats = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Run counts in parallel
+      const [
+        usersCount,
+        pendingUsersCount,
+        approvedVideosCount,
+        pendingVideosCount,
+        pendingChannelsCount,
+        topicRequestsCount
+      ] = await Promise.all([
+        supabase.from('users').select('*', { count: 'exact', head: true }),
+        supabase.from('users').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+        supabase.from('videos').select('*', { count: 'exact', head: true }).eq('status', 'approved'),
+        supabase.from('videos').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+        supabase.from('channels').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+        supabase.from('topic_requests').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+      ]);
+
+      // Fetch recent activity
+      const [latestUsers, latestVideos, latestChannels] = await Promise.all([
+        supabase.from('users').select('email, created_at').order('created_at', { ascending: false }).limit(3),
+        supabase.from('videos').select('title, status, created_at, approved_at').order('created_at', { ascending: false }).limit(3),
+        supabase.from('channels').select('name, created_at').order('created_at', { ascending: false }).limit(3),
+      ]);
+
+      // Process activity
+      const activity: any[] = [];
+
+      latestUsers.data?.forEach((u: any) => {
+        activity.push({
+          type: 'user',
+          action: 'User registered',
+          user: u.email || 'Unknown User',
+          time: u.created_at,
+          original_timestamp: new Date(u.created_at).getTime()
+        });
+      });
+
+      latestVideos.data?.forEach((v: any) => {
+        if (v.status === 'approved' && v.approved_at) {
+          activity.push({
+            type: 'video',
+            action: 'Video approved',
+            user: v.title,
+            time: v.approved_at,
+            original_timestamp: new Date(v.approved_at).getTime()
+          });
+        } else {
+          activity.push({
+            type: 'video',
+            action: 'Video uploaded',
+            user: v.title,
+            time: v.created_at,
+            original_timestamp: new Date(v.created_at).getTime()
+          });
+        }
+      });
+
+      latestChannels.data?.forEach((c: any) => {
+        activity.push({
+          type: 'channel',
+          action: 'Channel added',
+          user: c.name,
+          time: c.created_at,
+          original_timestamp: new Date(c.created_at).getTime()
+        });
+      });
+
+      // Sort by time descending and take top 5
+      const sortedActivity = activity
+        .sort((a, b) => b.original_timestamp - a.original_timestamp)
+        .slice(0, 5);
+
+      return {
+        totalUsers: usersCount.count || 0,
+        pendingUsers: pendingUsersCount.count || 0,
+        approvedVideos: approvedVideosCount.count || 0,
+        pendingReviews: (pendingVideosCount.count || 0) + (pendingChannelsCount.count || 0),
+        topicRequests: topicRequestsCount.count || 0,
+        recentActivity: sortedActivity
+      };
+
+    } catch (err: any) {
+      console.error('Error in useAdminStats:', err);
+      setError(err.message || 'Failed to fetch admin stats');
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return {
+    loading,
+    error,
+    fetchStats
   };
 }

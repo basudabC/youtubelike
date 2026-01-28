@@ -351,6 +351,47 @@ export function useDashboard() {
     };
 
     fetchDashboardData();
+
+    // Set up real-time subscription for watch progress changes
+    console.log('[Dashboard] Setting up real-time subscription for user:', user.id);
+    const channel = supabase
+      .channel('dashboard_watch_progress')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'watch_progress',
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          console.log('[Dashboard] Received watch_progress change:', payload);
+          // Refetch dashboard data when watch progress changes
+          fetchDashboardData();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'users',
+          filter: `id=eq.${user.id}`,
+        },
+        (payload) => {
+          console.log('[Dashboard] Received users change:', payload);
+          // Refetch when user stats are updated
+          fetchDashboardData();
+        }
+      )
+      .subscribe((status) => {
+        console.log('[Dashboard] Subscription status:', status);
+      });
+
+    return () => {
+      console.log('[Dashboard] Unsubscribing from real-time updates');
+      channel.unsubscribe();
+    };
   }, [user]);
 
   return {
@@ -380,12 +421,22 @@ export function useWatchHistory() {
       try {
         const { data, error } = await supabase
           .from('watch_progress')
-          .select(`*, video:videos(*, channel:channels(*))`)
+          .select(`*, video:videos(*, channel:channels(*), topics:video_topics(topic:topics(*)))`)
           .eq('user_id', user.id)
           .order('last_watched_at', { ascending: false });
 
         if (error) throw error;
-        setHistory(data || []);
+
+        // Process the data to flatten topics
+        const processedData = (data || []).map((item: any) => ({
+          ...item,
+          video: item.video ? {
+            ...item.video,
+            topics: item.video.topics?.map((vt: any) => vt.topic).filter(Boolean) || [],
+          } : null,
+        }));
+
+        setHistory(processedData);
       } catch (err: any) {
         setError(err.message || 'Failed to fetch watch history');
       } finally {
@@ -394,9 +445,61 @@ export function useWatchHistory() {
     };
 
     fetchHistory();
+
+    // Set up real-time subscription for watch history changes
+    const channel = supabase
+      .channel('watch_history_changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'watch_progress',
+          filter: `user_id=eq.${user.id}`,
+        },
+        () => {
+          // Refetch history when watch progress changes
+          fetchHistory();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      channel.unsubscribe();
+    };
   }, [user]);
 
-  return { history, loading, error, refetch: () => { } };
+  const refetch = useCallback(() => {
+    if (!user) return;
+
+    const fetchHistory = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('watch_progress')
+          .select(`*, video:videos(*, channel:channels(*), topics:video_topics(topic:topics(*)))`)
+          .eq('user_id', user.id)
+          .order('last_watched_at', { ascending: false });
+
+        if (error) throw error;
+
+        const processedData = (data || []).map((item: any) => ({
+          ...item,
+          video: item.video ? {
+            ...item.video,
+            topics: item.video.topics?.map((vt: any) => vt.topic).filter(Boolean) || [],
+          } : null,
+        }));
+
+        setHistory(processedData);
+      } catch (err: any) {
+        setError(err.message || 'Failed to fetch watch history');
+      }
+    };
+
+    fetchHistory();
+  }, [user]);
+
+  return { history, loading, error, refetch };
 }
 
 export function useNotices() {

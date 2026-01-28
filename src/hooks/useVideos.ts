@@ -48,7 +48,7 @@ export function useVideos(options: UseVideosOptions = {}): UseVideosReturn {
         .select(`
           *,
           channel:channels(*),
-          topics:video_topics!inner(topic:topics(*))
+          topics:video_topics(topic:topics(*))
         `, { count: 'exact' })
         .order('published_at', { ascending: false });
 
@@ -78,7 +78,7 @@ export function useVideos(options: UseVideosOptions = {}): UseVideosReturn {
 
       const processedVideos = ((data || []) as any[]).map((video: any) => ({
         ...video,
-        topics: (video.topics as any[])?.map((vt: any) => vt.topic) || [],
+        topics: (video.topics as any[])?.map((vt: any) => vt.topic).filter(Boolean) || [],
       })) as VideoWithDetails[];
 
       if (isLoadMore) {
@@ -141,7 +141,7 @@ export function useVideo(videoId: string) {
           .select(`
             *,
             channel:channels(*),
-            topics:video_topics!inner(topic:topics(*))
+            topics:video_topics(topic:topics(*))
           `)
           .eq('id', videoId)
           .single();
@@ -150,7 +150,7 @@ export function useVideo(videoId: string) {
 
         const processedVideo = {
           ...(data as any),
-          topics: ((data as any)?.topics as any[])?.map((vt: any) => vt.topic) || [],
+          topics: ((data as any)?.topics as any[])?.map((vt: any) => vt.topic).filter(Boolean) || [],
         } as VideoWithDetails;
 
         setVideo(processedVideo);

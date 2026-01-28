@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from '@/contexts/AuthContext';
 import { Navigation } from '@/sections/Landing/Navigation';
 import { Hero } from '@/sections/Landing/Hero';
 import { TopicsGrid } from '@/sections/Landing/TopicsGrid';
+import { LandingVideos } from '@/sections/Landing/LandingVideos';
 import { Features } from '@/sections/Landing/Features';
 import { HowItWorks } from '@/sections/Landing/HowItWorks';
 import { Testimonials } from '@/sections/Landing/Testimonials';
@@ -119,6 +120,16 @@ function AppContent() {
           >
             <Hero onGetStarted={() => setShowLogin(true)} />
             <TopicsGrid onTopicSelect={handleTopicSelect} />
+            <LandingVideos
+              onVideoSelect={(videoId) => {
+                if (!user) {
+                  setShowLogin(true);
+                } else {
+                  handleVideoSelect(videoId);
+                }
+              }}
+              onNavigate={navigateTo}
+            />
             <Features />
             <HowItWorks />
             <Testimonials />
