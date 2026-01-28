@@ -34,6 +34,7 @@ export function AddChannelModal({ isOpen, onClose, onSuccess }: AddChannelModalP
         try {
             // Extract channel ID from input
             const channelId = extractChannelId(channelInput) || channelInput.trim();
+            console.log('[AddChannelModal] Extracted channel ID:', channelId);
 
             // Fetch channel details from YouTube
             const data = await getChannelDetails(channelId);
@@ -44,10 +45,12 @@ export function AddChannelModal({ isOpen, onClose, onSuccess }: AddChannelModalP
                 return;
             }
 
+            console.log('[AddChannelModal] Channel data received:', data);
             setChannelData(data);
             setStep('preview');
         } catch (err: any) {
-            setError(err.message || 'Failed to fetch channel details');
+            console.error('[AddChannelModal] Error:', err);
+            setError(err.message || 'Failed to fetch channel details. Please try again.');
         } finally {
             setLoading(false);
         }

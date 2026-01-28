@@ -97,37 +97,85 @@ export function parseDuration(isoDuration: string): number {
 }
 
 /**
+ * Fetch with timeout
+ */
+async function fetchWithTimeout(url: string, timeout: number = 10000): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        return response;
+    } catch (error: any) {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+            throw new Error('Request timeout - YouTube API took too long to respond');
+        }
+        throw error;
+    }
+}
+
+/**
  * Fetch channel details by channel ID or username
  */
 export async function getChannelDetails(channelIdOrUsername: string): Promise<YouTubeChannel | null> {
+    console.log('[YouTube API] Fetching channel details for:', channelIdOrUsername);
+
+    if (!YOUTUBE_API_KEY) {
+        console.error('[YouTube API] API key is missing!');
+        throw new Error('YouTube API key is not configured. Please add VITE_YOUTUBE_API_KEY to your .env file.');
+    }
+
     try {
         // First try as channel ID
         let url = `${YOUTUBE_API_BASE}/channels?part=snippet,statistics,brandingSettings&id=${channelIdOrUsername}&key=${YOUTUBE_API_KEY}`;
+        console.log('[YouTube API] Trying as channel ID...');
 
-        let response = await fetch(url);
+        let response = await fetchWithTimeout(url);
         let data = await response.json();
+
+        // Check for API errors
+        if (data.error) {
+            console.error('[YouTube API] Error response:', data.error);
+            throw new Error(data.error.message || 'YouTube API error');
+        }
 
         // If not found, try as username
         if (!data.items || data.items.length === 0) {
+            console.log('[YouTube API] Not found as channel ID, trying as username...');
             url = `${YOUTUBE_API_BASE}/channels?part=snippet,statistics,brandingSettings&forUsername=${channelIdOrUsername}&key=${YOUTUBE_API_KEY}`;
-            response = await fetch(url);
+            response = await fetchWithTimeout(url);
             data = await response.json();
+
+            if (data.error) {
+                console.error('[YouTube API] Error response:', data.error);
+                throw new Error(data.error.message || 'YouTube API error');
+            }
         }
 
-        // If still not found, try as custom URL
+        // If still not found, try as custom URL (search)
         if (!data.items || data.items.length === 0) {
-            url = `${YOUTUBE_API_BASE}/search?part=snippet&type=channel&q=${channelIdOrUsername}&key=${YOUTUBE_API_KEY}`;
-            response = await fetch(url);
+            console.log('[YouTube API] Not found as username, trying search...');
+            url = `${YOUTUBE_API_BASE}/search?part=snippet&type=channel&q=${encodeURIComponent(channelIdOrUsername)}&key=${YOUTUBE_API_KEY}`;
+            response = await fetchWithTimeout(url);
             data = await response.json();
 
+            if (data.error) {
+                console.error('[YouTube API] Error response:', data.error);
+                throw new Error(data.error.message || 'YouTube API error');
+            }
+
             if (data.items && data.items.length > 0) {
-                const channelId = data.items[0].snippet.channelId;
+                const channelId = data.items[0].snippet.channelId || data.items[0].id.channelId;
+                console.log('[YouTube API] Found channel via search, fetching full details...');
                 return getChannelDetails(channelId);
             }
         }
 
         if (!data.items || data.items.length === 0) {
-            throw new Error('Channel not found');
+            console.error('[YouTube API] Channel not found after all attempts');
+            throw new Error('Channel not found. Please check the channel ID or URL and try again.');
         }
 
         const channel = data.items[0];
@@ -135,7 +183,7 @@ export async function getChannelDetails(channelIdOrUsername: string): Promise<Yo
         const statistics = channel.statistics;
         const branding = channel.brandingSettings;
 
-        return {
+        const channelData = {
             id: channel.id,
             title: snippet.title,
             description: snippet.description,
@@ -144,9 +192,24 @@ export async function getChannelDetails(channelIdOrUsername: string): Promise<Yo
             subscriberCount: parseInt(statistics.subscriberCount || '0', 10),
             videoCount: parseInt(statistics.videoCount || '0', 10),
         };
-    } catch (error) {
-        console.error('Error fetching channel details:', error);
-        return null;
+
+        console.log('[YouTube API] Successfully fetched channel:', channelData.title);
+        return channelData;
+    } catch (error: any) {
+        console.error('[YouTube API] Error fetching channel details:', error);
+
+        // Provide user-friendly error messages
+        if (error.message.includes('timeout')) {
+            throw new Error('Request timeout. Please check your internet connection and try again.');
+        } else if (error.message.includes('API key')) {
+            throw error; // Pass through API key errors
+        } else if (error.message.includes('quota')) {
+            throw new Error('YouTube API quota exceeded. Please try again later.');
+        } else if (error.message.includes('not found')) {
+            throw error; // Pass through not found errors
+        } else {
+            throw new Error(error.message || 'Failed to fetch channel details. Please try again.');
+        }
     }
 }
 
@@ -157,29 +220,54 @@ export async function getChannelVideos(
     channelId: string,
     maxResults: number = 50
 ): Promise<YouTubeVideo[]> {
+    console.log('[YouTube API] Fetching videos for channel:', channelId, 'maxResults:', maxResults);
+
+    if (!YOUTUBE_API_KEY) {
+        console.error('[YouTube API] API key is missing!');
+        throw new Error('YouTube API key is not configured');
+    }
+
     try {
         // First, get video IDs from channel
         const searchUrl = `${YOUTUBE_API_BASE}/search?part=snippet&channelId=${channelId}&type=video&order=date&maxResults=${maxResults}&key=${YOUTUBE_API_KEY}`;
-        const searchResponse = await fetch(searchUrl);
+        console.log('[YouTube API] Searching for videos...');
+
+        const searchResponse = await fetchWithTimeout(searchUrl);
         const searchData = await searchResponse.json();
 
+        if (searchData.error) {
+            console.error('[YouTube API] Search error:', searchData.error);
+            throw new Error(searchData.error.message || 'YouTube API error');
+        }
+
         if (!searchData.items || searchData.items.length === 0) {
+            console.log('[YouTube API] No videos found for channel');
             return [];
         }
+
+        console.log('[YouTube API] Found', searchData.items.length, 'videos');
 
         // Extract video IDs
         const videoIds = searchData.items.map((item: any) => item.id.videoId).join(',');
 
         // Fetch detailed video information
         const videosUrl = `${YOUTUBE_API_BASE}/videos?part=snippet,contentDetails,statistics&id=${videoIds}&key=${YOUTUBE_API_KEY}`;
-        const videosResponse = await fetch(videosUrl);
+        console.log('[YouTube API] Fetching video details...');
+
+        const videosResponse = await fetchWithTimeout(videosUrl);
         const videosData = await videosResponse.json();
 
+        if (videosData.error) {
+            console.error('[YouTube API] Videos error:', videosData.error);
+            throw new Error(videosData.error.message || 'YouTube API error');
+        }
+
         if (!videosData.items) {
+            console.log('[YouTube API] No video details found');
             return [];
         }
 
-        return videosData.items.map((video: any) => ({
+        const videos = videosData.items.map((video: any) => ({
             id: video.id,
             title: video.snippet.title,
             description: video.snippet.description,
@@ -190,9 +278,19 @@ export async function getChannelVideos(
             likeCount: parseInt(video.statistics.likeCount || '0', 10),
             tags: video.snippet.tags || [],
         }));
-    } catch (error) {
-        console.error('Error fetching channel videos:', error);
-        return [];
+
+        console.log('[YouTube API] Successfully fetched', videos.length, 'video details');
+        return videos;
+    } catch (error: any) {
+        console.error('[YouTube API] Error fetching channel videos:', error);
+
+        if (error.message.includes('timeout')) {
+            throw new Error('Request timeout while fetching videos. Please try again.');
+        } else if (error.message.includes('quota')) {
+            throw new Error('YouTube API quota exceeded. Please try again later.');
+        } else {
+            throw new Error(error.message || 'Failed to fetch videos from YouTube');
+        }
     }
 }
 
